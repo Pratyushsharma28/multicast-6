@@ -1,0 +1,22 @@
+# Secrets and machine-specific configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*credentials*
+local.properties
+
+# Dependencies and generated builds
+node_modules/
+dist/
+coverage/
+build/
+.gradle/
+.work/
+
+# macOS and editor files
+.DS_Store
+.idea/
+.vscode/
+*.swp
