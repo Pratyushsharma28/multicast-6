@@ -5,16 +5,15 @@ import "./App.css";
 const apiBase = `http://${window.location.hostname || "localhost"}:3000`;
 
 const menuItems = [
-  { name: "Dashboard", icon: "⌂" },
-  { name: "Devices", icon: "▣" },
-  { name: "Media Library", icon: "▤" },
+  { name: "Overview", icon: "⌂" },
   { name: "Cast Studio", icon: "▷" },
-  { name: "Broadcast", icon: "◉" },
+  { name: "Devices", icon: "▣" },
+  { name: "Activity", icon: "◷" },
   { name: "Settings", icon: "⚙" },
 ];
 
 function App() {
-  const [activePage, setActivePage] = useState("Dashboard");
+  const [activePage, setActivePage] = useState("Overview");
   const [backendOnline, setBackendOnline] = useState(false);
   const [deviceData, setDeviceData] = useState(null);
   const [devicesLoading, setDevicesLoading] = useState(true);
@@ -152,7 +151,7 @@ function App() {
           </div>
         </header>
 
-        {activePage === "Dashboard" ? (
+        {activePage === "Overview" ? (
           <Dashboard
             deviceData={deviceData}
             devicesLoading={devicesLoading}
@@ -181,6 +180,7 @@ function CastStudio() {
   const [codeInput, setCodeInput] = useState("");
   const [code, setCode] = useState("");
   const [status, setStatus] = useState("Choose a role to start a local Mac-to-Mac test.");
+  const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
   const [remoteStream, setRemoteStream] = useState(null);
   const videoRef = useRef(null);
@@ -321,7 +321,7 @@ function CastStudio() {
     <div className="cast-panel">
       {remoteStream ? <video className="mirror-video" ref={videoRef} autoPlay playsInline /> : <div className="mirror-placeholder">◉<span>{mode === "receiver" ? "Waiting for a screen" : "Your shared screen will appear on the other Mac"}</span></div>}
       <p className="mirror-status">{status}</p>
-      {code && <div className="pair-code"><span>PAIRING CODE</span><strong>{code}</strong><small>Expires after 10 minutes. Share only with the Mac you want to connect.</small></div>}
+      {code && <div className="pair-code"><div className="pair-code-heading"><span>PAIRING CODE</span><button type="button" className="copy-button" onClick={() => { navigator.clipboard?.writeText(code); setCopied(true); setTimeout(() => setCopied(false), 1800); }}>{copied ? "Copied" : "Copy code"}</button></div><strong>{code}</strong><small>Expires after 10 minutes. Share only with the Mac you want to connect.</small></div>}
       {!code ? <div className="cast-actions"><button className="discover-button" disabled={busy} onClick={startSender}>{busy ? "Starting…" : "Share this Mac’s screen"}</button><form onSubmit={joinReceiver}><label htmlFor="pair-code-input">Or join from this Mac</label><div><input id="pair-code-input" value={codeInput} onChange={(event) => setCodeInput(event.target.value.replace(/\D/g, "").slice(0, 6))} inputMode="numeric" placeholder="6-digit code" maxLength={6} /><button className="discover-button" disabled={busy || codeInput.length !== 6}>Join</button></div></form></div> : <button className="stop-button" onClick={async () => { if (sessionRef.current) { await sendSignal({ type: "stop" }); await new Promise((resolve) => setTimeout(resolve, 500)); } await stop(); setStatus("Session stopped."); }}>Stop sharing / disconnect</button>}
     </div>
     <p className="cast-help">On the sending Mac, open the dashboard at <code>http://localhost:5173</code> and allow screen sharing in the macOS picker. On the receiving Mac, open the sender’s LAN address on port 5173 and enter the code. Start the backend and Vite dashboard on the sending Mac with both listening on the local network.</p>
@@ -336,15 +336,15 @@ function Dashboard({ deviceData, devicesLoading, devicesError, scanLoading, scan
     <div className="dashboard">
       <section className="welcome">
         <div>
-          <span className="eyebrow">YOUR BROADCASTING STATION</span>
-          <h2>All your screens.<br />One control center.</h2>
-          <p>Manage and broadcast content across up to six displays.</p>
+          <span className="eyebrow">MULTICAST 6 · CONTROL CENTER</span>
+          <h2>Every screen.<br /><em>In perfect sync.</em></h2>
+          <p>Discover, connect, and mirror your local displays from one calm workspace.</p>
         </div>
         <div className="welcome-graphic">M6</div>
       </section>
 
       <section className="stats">
-        <Stat label="TOTAL SCREENS" value="06" detail="Maximum capacity" />
+        <Stat label="SCREEN SLOTS" value="06" detail="Maximum capacity" />
         <Stat
           label="DISCOVERED CANDIDATES"
           value={String(deviceData?.discoveredCandidates ?? devices.length).padStart(2, "0")}
@@ -362,7 +362,7 @@ function Dashboard({ deviceData, devicesLoading, devicesError, scanLoading, scan
           <p>Find receiver candidates from SSDP advertisements on your local network.</p>
         </div>
         <button className="discover-button" onClick={onScan} disabled={scanLoading || devicesLoading}>
-          {scanLoading ? <><span className="scan-spinner" /> Scanning local network…</> : "◉  Scan for TVs"}
+          {scanLoading ? <><span className="scan-spinner" /> Scanning network…</> : "Scan network"}
         </button>
       </section>
 
