@@ -18,4 +18,8 @@ export default defineConfig([
       parserOptions: { ecmaFeatures: { jsx: true } },
     },
   },
+  {
+    files: ['electron/**/*.js'],
+    languageOptions: { globals: globals.node },
+  },
 ])

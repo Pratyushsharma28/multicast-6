@@ -3,6 +3,7 @@ const { randomInt } = require("node:crypto");
 const express = require("express");
 const cors = require("cors");
 const { parseHeaders, groupAdvertisements } = require("./discovery");
+const { PROTOCOL_VERSION, MAX_MESSAGE_BYTES, MAX_QUEUE_LENGTH, validateSignalMessage } = require("./mirror-protocol");
 
 const app = express();
 app.use(cors());
@@ -30,7 +31,7 @@ app.post("/api/mirror/sessions", (req, res) => {
   let code;
   do { code = makePairingCode(); } while (mirrorSessions.has(code));
   mirrorSessions.set(code, { expiresAt: Date.now() + SESSION_TTL_MS, joined: false, sender: [], receiver: [] });
-  res.status(201).json({ success: true, code, expiresInSeconds: SESSION_TTL_MS / 1000 });
+  res.status(201).json({ success: true, code, protocolVersion: PROTOCOL_VERSION, expiresInSeconds: SESSION_TTL_MS / 1000 });
 });
 
 app.post("/api/mirror/sessions/:code/join", (req, res) => {
@@ -57,10 +58,15 @@ app.post("/api/mirror/sessions/:code/messages", (req, res) => {
   if (!session) return res.status(404).json({ success: false, error: "Pairing code expired or session stopped." });
   if (role !== "sender" && role !== "receiver") return res.status(400).json({ success: false, error: "Invalid session role." });
   if (role === "receiver" && !session.joined) return res.status(409).json({ success: false, error: "Join the session before signaling." });
-  if (!req.body || typeof req.body !== "object" || JSON.stringify(req.body).length > 100_000) {
+  if (!req.body || typeof req.body !== "object" || Buffer.byteLength(JSON.stringify(req.body)) > MAX_MESSAGE_BYTES) {
     return res.status(400).json({ success: false, error: "Invalid signaling message." });
   }
+  const validationError = validateSignalMessage(req.body, role);
+  if (validationError) return res.status(400).json({ success: false, error: validationError });
   const recipient = role === "sender" ? "receiver" : "sender";
+  if (session[recipient].length >= MAX_QUEUE_LENGTH) {
+    return res.status(429).json({ success: false, error: "Signaling queue is full." });
+  }
   session[recipient].push(req.body);
   session.expiresAt = Date.now() + SESSION_TTL_MS;
   res.status(202).json({ success: true });

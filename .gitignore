@@ -13,6 +13,7 @@ dist/
 coverage/
 build/
 .gradle/
+**/.kotlin/
 .work/
 
 # macOS and editor files
@@ -20,3 +21,4 @@ build/
 .idea/
 .vscode/
 *.swp
+outputs/

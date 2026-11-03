@@ -1,8 +1,10 @@
 
 import { useEffect, useRef, useState } from "react";
+import { createFrameDiagnostics, describeCaptureError } from "../electron/capture-diagnostics.js";
 import "./App.css";
 
-const apiBase = `http://${window.location.hostname || "localhost"}:3000`;
+const defaultApiBase = `http://${window.location.hostname || "localhost"}:3000`;
+const getApiBase = () => localStorage.getItem("multicast-signaling-server") || defaultApiBase;
 
 const menuItems = [
   { name: "Overview", icon: "⌂" },
@@ -26,7 +28,7 @@ function App() {
     const checkBackend = async () => {
       try {
         const response = await fetch(
-          `${apiBase}/api/health`
+          `${getApiBase()}/api/health`
         );
 
         const data = await response.json();
@@ -47,7 +49,7 @@ function App() {
     setScanLoading(true);
     setScanError("");
     try {
-      const response = await fetch(`${apiBase}/api/discovery/scan`, {
+      const response = await fetch(`${getApiBase()}/api/discovery/scan`, {
         method: "POST",
       });
       const data = await response.json();
@@ -68,7 +70,7 @@ function App() {
 
     const fetchDevices = async () => {
       try {
-        const response = await fetch(`${apiBase}/api/devices`);
+        const response = await fetch(`${getApiBase()}/api/devices`);
         if (!response.ok) throw new Error("Devices request failed");
 
         const data = await response.json();
@@ -177,17 +179,41 @@ function App() {
 
 function CastStudio() {
   const [mode, setMode] = useState("sender");
+  const [serverAddress, setServerAddress] = useState(getApiBase());
+  const [serverDraft, setServerDraft] = useState(getApiBase());
   const [codeInput, setCodeInput] = useState("");
   const [code, setCode] = useState("");
   const [status, setStatus] = useState("Choose a role to start a local Mac-to-Mac test.");
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
   const [remoteStream, setRemoteStream] = useState(null);
+  const [nativeDisplays, setNativeDisplays] = useState([]);
+  const [selectedDisplay, setSelectedDisplay] = useState("");
+  const [nativeDisplayError, setNativeDisplayError] = useState("");
+  const [loadingDisplays, setLoadingDisplays] = useState(false);
+  const [captureDiagnostics, setCaptureDiagnostics] = useState({ state: "Not checked", count: 0, fps: 0, error: "" });
+  const frameDiagnosticsRef = useRef(null);
   const videoRef = useRef(null);
+  const canvasRef = useRef(null);
   const sessionRef = useRef(null);
   const peerRef = useRef(null);
   const localStreamRef = useRef(null);
+  const removeFrameListenerRef = useRef(null);
+  const removeStatusListenerRef = useRef(null);
   const stoppedRef = useRef(false);
+
+  const saveServerAddress = () => {
+    const raw = serverDraft.trim().replace(/\/$/, "");
+    const normalized = /^https?:\/\//i.test(raw) ? raw : `http://${raw}`;
+    try {
+      const parsed = new URL(normalized);
+      if (!parsed.hostname || parsed.pathname !== "/") throw new Error("Enter a server host and optional port only.");
+      localStorage.setItem("multicast-signaling-server", normalized);
+      setServerAddress(normalized);
+      setServerDraft(normalized);
+      setStatus(`Signaling server set to ${normalized}.`);
+    } catch (error) { setStatus(error.message || "Enter a valid signaling server address."); }
+  };
 
   useEffect(() => {
     if (videoRef.current && remoteStream) videoRef.current.srcObject = remoteStream;
@@ -200,9 +226,14 @@ function CastStudio() {
     peerRef.current = null;
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
     localStreamRef.current = null;
+    removeFrameListenerRef.current?.();
+    removeFrameListenerRef.current = null;
+    removeStatusListenerRef.current?.();
+    removeStatusListenerRef.current = null;
+    await window.captureBridge?.stop().catch(() => {});
     setRemoteStream(null);
     if (removeSession && sessionRef.current?.code) {
-      await fetch(`${apiBase}/api/mirror/sessions/${sessionRef.current.code}`, { method: "DELETE" }).catch(() => {});
+      await fetch(`${getApiBase()}/api/mirror/sessions/${sessionRef.current.code}`, { method: "DELETE" }).catch(() => {});
     }
     sessionRef.current = null;
     setCode("");
@@ -214,13 +245,40 @@ function CastStudio() {
     if (sessionRef.current) clearInterval(sessionRef.current.poller);
     peerRef.current?.close();
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
+    removeFrameListenerRef.current?.();
+    removeStatusListenerRef.current?.();
+    window.captureBridge?.stop().catch(() => {});
   }, []);
+
+  const loadNativeDisplays = async () => {
+    if (!window.captureBridge) return;
+    setLoadingDisplays(true);
+    setNativeDisplayError("");
+    setCaptureDiagnostics({ state: "Checking helper and Screen Recording access…", count: 0, fps: 0, error: "" });
+    try {
+      const displays = await window.captureBridge.listDisplays();
+      setNativeDisplays(displays);
+      setCaptureDiagnostics({ state: `Ready · ${displays.length} display${displays.length === 1 ? "" : "s"} available`, count: 0, fps: 0, error: "" });
+      if (displays.length) setSelectedDisplay(String(displays[0].id));
+      else {
+        const message = "macOS did not return any shareable displays. Check Screen Recording access, then refresh displays.";
+        setNativeDisplayError(message);
+        setCaptureDiagnostics({ state: "No displays available", count: 0, fps: 0, error: message });
+      }
+    } catch (error) {
+      const message = describeCaptureError(error);
+      setNativeDisplayError(message);
+      setCaptureDiagnostics({ state: "Could not check capture", count: 0, fps: 0, error: message });
+    } finally {
+      setLoadingDisplays(false);
+    }
+  };
 
   const sendSignal = async (message) => {
     const current = sessionRef.current;
     if (!current) return;
-    await fetch(`${apiBase}/api/mirror/sessions/${current.code}/messages?role=${current.role}`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(message),
+    await fetch(`${getApiBase()}/api/mirror/sessions/${current.code}/messages?role=${current.role}`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ protocolVersion: 1, ...message }),
     });
   };
 
@@ -244,7 +302,7 @@ function CastStudio() {
       if (polling || stoppedRef.current) return;
       polling = true;
       try {
-        const response = await fetch(`${apiBase}/api/mirror/sessions/${session.code}/messages?role=${role}`);
+        const response = await fetch(`${getApiBase()}/api/mirror/sessions/${session.code}/messages?role=${role}`);
         if (!response.ok) throw new Error("The session expired or was stopped.");
         const data = await response.json();
         if (role === "sender" && data.joined) setStatus("Receiver joined. Starting direct video connection…");
@@ -278,13 +336,55 @@ function CastStudio() {
   const startSender = async () => {
     setBusy(true); setMode("sender"); stoppedRef.current = false;
     try {
-      if (!navigator.mediaDevices?.getDisplayMedia) throw new Error("Screen sharing is unavailable. Open this page on the sending Mac at http://localhost:5173.");
-      const response = await fetch(`${apiBase}/api/mirror/sessions`, { method: "POST" });
+      const response = await fetch(`${getApiBase()}/api/mirror/sessions`, { method: "POST" });
       const session = await response.json();
       if (!response.ok) throw new Error(session.error || "Could not create a pairing code.");
       sessionRef.current = { code: session.code, role: "sender" }; setCode(session.code);
-      setStatus("Choose the screen to share in the macOS picker.");
-      const stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: false });
+      let stream;
+      if (window.captureBridge) {
+        const canvas = canvasRef.current;
+        const context = canvas?.getContext("2d", { alpha: false });
+        if (!canvas || !context) throw new Error("The native capture preview surface is unavailable.");
+        canvas.width = 1280;
+        canvas.height = 720;
+        stream = canvas.captureStream(15);
+        localStreamRef.current = stream;
+        frameDiagnosticsRef.current = createFrameDiagnostics();
+        setCaptureDiagnostics({ state: "Starting native helper…", count: 0, fps: 0, error: "" });
+        removeFrameListenerRef.current = window.captureBridge.onFrame(async (bytes) => {
+          const stats = frameDiagnosticsRef.current?.record();
+          if (stats) setCaptureDiagnostics((previous) => ({ ...previous, state: "Receiving native frames", ...stats, error: "" }));
+          try {
+            const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/jpeg" }));
+            if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+              canvas.width = bitmap.width;
+              canvas.height = bitmap.height;
+            }
+            context.drawImage(bitmap, 0, 0);
+            bitmap.close();
+          } catch (error) {
+            console.error("Could not render a ScreenCaptureKit frame", error);
+          }
+        });
+        removeStatusListenerRef.current = window.captureBridge.onStatus((captureStatus) => {
+          if (captureStatus.type === "error") {
+            const message = describeCaptureError(captureStatus.message || "ScreenCaptureKit stopped.");
+            setStatus(message);
+            setCaptureDiagnostics((previous) => ({ ...previous, state: "Capture error", error: message }));
+            stop();
+          } else if (captureStatus.type === "started") {
+            setCaptureDiagnostics((previous) => ({ ...previous, state: "Capture started · waiting for first frame" }));
+          } else if (captureStatus.type === "stopped") {
+            setCaptureDiagnostics((previous) => ({ ...previous, state: "Capture stopped" }));
+          }
+        });
+        await window.captureBridge.start(Number(selectedDisplay));
+        setCaptureDiagnostics((previous) => ({ ...previous, state: "Capture started · waiting for first frame" }));
+      } else {
+        if (!navigator.mediaDevices?.getDisplayMedia) throw new Error("Screen sharing is unavailable. Run the MultiCast desktop app on the sending Mac.");
+        setStatus("Choose the screen to share in the macOS picker.");
+        stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: false });
+      }
       localStreamRef.current = stream;
       stream.getVideoTracks()[0].addEventListener("ended", () => stop());
       const peer = setupPeer();
@@ -294,7 +394,9 @@ function CastStudio() {
       startPolling(sessionRef.current, peer, "sender");
       setStatus("Waiting for the other Mac to join. Keep this window open.");
     } catch (error) {
-      setStatus(error.message || "Could not start screen sharing.");
+      const message = window.captureBridge ? describeCaptureError(error) : (error.message || "Could not start screen sharing.");
+      setStatus(message);
+      if (window.captureBridge) setCaptureDiagnostics((previous) => ({ ...previous, state: "Capture failed", error: message }));
       await stop();
     } finally { setBusy(false); }
   };
@@ -303,7 +405,7 @@ function CastStudio() {
     event.preventDefault(); setBusy(true); setMode("receiver"); stoppedRef.current = false;
     const cleanCode = codeInput.replace(/\D/g, "").slice(0, 6);
     try {
-      const response = await fetch(`${apiBase}/api/mirror/sessions/${cleanCode}/join`, { method: "POST" });
+      const response = await fetch(`${getApiBase()}/api/mirror/sessions/${cleanCode}/join`, { method: "POST" });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "Could not join this session.");
       sessionRef.current = { code: cleanCode, role: "receiver" }; setCode(cleanCode);
@@ -315,16 +417,23 @@ function CastStudio() {
   };
 
   return <section className="cast-studio">
-    <span className="eyebrow">LOCAL WEBRTC PROOF OF CONCEPT</span>
+    <span className="eyebrow">WEBRTC SCREEN SHARING</span>
     <h2>Mac to Mac screen mirroring</h2>
     <p className="cast-intro">Video goes directly between Macs on your Wi-Fi. The local backend only passes a temporary pairing code and connection setup messages.</p>
     <div className="cast-panel">
+      <canvas ref={canvasRef} className="native-capture-canvas" aria-hidden="true" />
       {remoteStream ? <video className="mirror-video" ref={videoRef} autoPlay playsInline /> : <div className="mirror-placeholder">◉<span>{mode === "receiver" ? "Waiting for a screen" : "Your shared screen will appear on the other Mac"}</span></div>}
       <p className="mirror-status">{status}</p>
+      {window.captureBridge && <section className="capture-diagnostics" aria-live="polite">
+        <div><span className="eyebrow">NATIVE CAPTURE CHECK</span><strong>{captureDiagnostics.state}</strong></div>
+        <div className="capture-metrics"><span><strong>{captureDiagnostics.count}</strong> frames received</span><span><strong>{captureDiagnostics.fps.toFixed(1)}</strong> FPS</span><span>Display <strong>{selectedDisplay || "—"}</strong></span></div>
+        <p className={captureDiagnostics.error ? "error" : ""}>{captureDiagnostics.error || "Permission is checked only when you choose a display or start sharing. No screen is captured until you start sharing."}</p>
+      </section>}
       {code && <div className="pair-code"><div className="pair-code-heading"><span>PAIRING CODE</span><button type="button" className="copy-button" onClick={() => { navigator.clipboard?.writeText(code); setCopied(true); setTimeout(() => setCopied(false), 1800); }}>{copied ? "Copied" : "Copy code"}</button></div><strong>{code}</strong><small>Expires after 10 minutes. Share only with the Mac you want to connect.</small></div>}
-      {!code ? <div className="cast-actions"><button className="discover-button" disabled={busy} onClick={startSender}>{busy ? "Starting…" : "Share this Mac’s screen"}</button><form onSubmit={joinReceiver}><label htmlFor="pair-code-input">Or join from this Mac</label><div><input id="pair-code-input" value={codeInput} onChange={(event) => setCodeInput(event.target.value.replace(/\D/g, "").slice(0, 6))} inputMode="numeric" placeholder="6-digit code" maxLength={6} /><button className="discover-button" disabled={busy || codeInput.length !== 6}>Join</button></div></form></div> : <button className="stop-button" onClick={async () => { if (sessionRef.current) { await sendSignal({ type: "stop" }); await new Promise((resolve) => setTimeout(resolve, 500)); } await stop(); setStatus("Session stopped."); }}>Stop sharing / disconnect</button>}
+      <div className="server-address"><label htmlFor="signaling-server">Signaling server</label><div><input id="signaling-server" value={serverDraft} onChange={(event) => setServerDraft(event.target.value)} placeholder="192.168.1.20:3000" disabled={Boolean(code)} /><button type="button" className="discover-button" onClick={saveServerAddress} disabled={Boolean(code) || serverDraft.trim() === serverAddress}>{code ? "In use" : "Save"}</button></div><small>Set this to the sender Mac’s reachable server address on both Macs.</small></div>
+      {!code ? <div className="cast-actions">{window.captureBridge && <div className="native-display-picker"><button className="discover-button" disabled={busy || loadingDisplays} onClick={loadNativeDisplays}>{loadingDisplays ? "Checking permission…" : nativeDisplays.length ? "Refresh displays" : "Choose a display"}</button>{nativeDisplays.length > 0 && <><label htmlFor="native-display-select">ScreenCaptureKit display</label><select id="native-display-select" value={selectedDisplay} onChange={(event) => setSelectedDisplay(event.target.value)}>{nativeDisplays.map((display) => <option key={display.id} value={display.id}>Display {display.id} · {display.width} × {display.height}</option>)}</select><button className="discover-button" disabled={busy || !selectedDisplay} onClick={startSender}>{busy ? "Starting…" : "Share selected display"}</button></>}{nativeDisplayError && <p className="device-message error">{nativeDisplayError}</p>}</div>}{!window.captureBridge && <button className="discover-button" disabled={busy} onClick={startSender}>{busy ? "Starting…" : "Share this Mac’s screen"}</button>}<form onSubmit={joinReceiver}><label htmlFor="pair-code-input">Or join from this Mac</label><div><input id="pair-code-input" value={codeInput} onChange={(event) => setCodeInput(event.target.value.replace(/\D/g, "").slice(0, 6))} inputMode="numeric" placeholder="6-digit code" maxLength={6} /><button className="discover-button" disabled={busy || codeInput.length !== 6}>Join</button></div></form></div> : <button className="stop-button" onClick={async () => { if (sessionRef.current) { await sendSignal({ type: "stop" }); await new Promise((resolve) => setTimeout(resolve, 500)); } await stop(); setStatus("Session stopped."); }}>Stop sharing / disconnect</button>}
     </div>
-    <p className="cast-help">On the sending Mac, open the dashboard at <code>http://localhost:5173</code> and allow screen sharing in the macOS picker. On the receiving Mac, open the sender’s LAN address on port 5173 and enter the code. Start the backend and Vite dashboard on the sending Mac with both listening on the local network.</p>
+    <p className="cast-help">{window.captureBridge ? <>In the desktop app, choose a display and allow <strong>Screen Recording</strong> in macOS Privacy &amp; Security settings if needed. On the receiving Mac, open the sender’s LAN address on port 5173 and enter the code.</> : <>The browser sender uses macOS’s system screen-sharing picker. Open the sender at <code>http://localhost:5173</code>; on the receiving Mac, open the sender’s LAN address on port 5173 and enter the code.</>} Start the backend and desktop dashboard on the sending Mac with both listening on the local network.</p>
   </section>;
 }
 
